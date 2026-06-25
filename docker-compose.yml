@@ -1,0 +1,8 @@
+services:
+  tubeworm:
+    build: .
+    image: tubeworm
+    container_name: tubeworm
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

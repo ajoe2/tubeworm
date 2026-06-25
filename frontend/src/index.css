@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Palette: deep-sea hydrothermal vent.
+ * Abyssal teal-black ground, a single vivid coral plume accent, and a warm
+ * vent-amber used only for highlights. HSL triplets so Tailwind can compose
+ * them with opacity modifiers.
+ */
+@layer base {
+  :root {
+    --background: 196 32% 6%;
+    --foreground: 180 14% 90%;
+
+    --card: 197 30% 8%;
+    --card-foreground: 180 14% 90%;
+
+    --primary: 9 88% 63%;
+    --primary-foreground: 12 45% 9%;
+
+    --secondary: 197 24% 13%;
+    --secondary-foreground: 180 12% 86%;
+
+    --muted: 197 22% 12%;
+    --muted-foreground: 193 12% 58%;
+
+    --accent: 30 92% 58%;
+    --accent-foreground: 30 60% 9%;
+
+    --destructive: 2 72% 56%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 197 20% 16%;
+    --input: 197 20% 18%;
+    --ring: 9 88% 63%;
+
+    --radius: 0.85rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    min-height: 100dvh;
+    /* Faint vent glow rising from below, plus a cool cast from above. */
+    background-image:
+      radial-gradient(
+        80% 55% at 50% 118%,
+        hsl(var(--primary) / 0.16),
+        transparent 70%
+      ),
+      radial-gradient(
+        90% 60% at 50% -20%,
+        hsl(197 40% 14% / 0.55),
+        transparent 60%
+      );
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
