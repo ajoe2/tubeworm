@@ -1,15 +1,9 @@
 # tubeworm
 
-A simple YouTube downloader you run on your own computer. Paste a link, pick
-**audio** or **video** and **quality** or **compatibility**, and the file saves
-straight to your browser's downloads. A progress bar shows speed, ETA, and size
-as it works.
+A YouTube downloader you run on your own computer. Paste a link, pick
+a file type, and click download.
 
-Everything runs locally: a FastAPI backend driving
-[yt-dlp](https://github.com/yt-dlp/yt-dlp) and `ffmpeg`, behind a small
-React/shadcn UI.
-
-## What you get
+## Supported file types
 
 | Type  | Priority      | Output  | Streams                                           |
 | ----- | ------------- | ------- | ------------------------------------------------- |
@@ -18,13 +12,12 @@ React/shadcn UI.
 | Audio | Quality       | `.opus` | Native Opus, the highest-quality audio            |
 | Audio | Compatibility | `.m4a`  | AAC — plays on anything                            |
 
-The **quality** options copy YouTube's original streams without re-encoding, so
-there's no quality loss — `ffmpeg` only repackages them into the chosen container.
+The quality options copy YouTube's original streams without re-encoding, so
+there's no quality loss.
 
 ## Run it with Docker
 
-Docker bundles tubeworm with everything it needs (Python, `ffmpeg`, and the rest),
-so you don't install any of that yourself. The steps are the same on Linux, macOS,
+Docker manages all dependencies, so you don't have to install any yourself. The steps are the same on Linux, macOS,
 and Windows.
 
 ### 1. Install Docker
@@ -73,10 +66,6 @@ From inside the `tubeworm` folder, run:
 docker compose up --build
 ```
 
-To open a terminal in the folder: on macOS use **Terminal**, on Windows use
-**PowerShell**, on Linux your terminal app — then `cd` into the folder (many file
-managers also have an "Open in Terminal" right-click option).
-
 The first run builds the image, which can take a few minutes. When you see
 `Uvicorn running on http://0.0.0.0:8000`, it's ready.
 
@@ -90,36 +79,6 @@ Go to **<http://localhost:8000>** in your browser.
 - **Start again later:** `docker compose up` (no `--build` unless you changed the code).
 - **Run in the background:** add `-d`, e.g. `docker compose up -d --build`, and stop
   later with `docker compose down`.
-
-## Run it for development
-
-Prefer to work without Docker? You'll need [uv](https://docs.astral.sh/uv/),
-Node.js, and `ffmpeg` installed.
-
-```bash
-# Terminal 1 — backend on http://127.0.0.1:8000
-uv run python main.py
-
-# Terminal 2 — frontend with hot reload on http://localhost:5173
-cd frontend && npm install && npm run dev
-```
-
-Use the 5173 URL while developing; Vite proxies `/api` to the backend. To serve the
-built UI from FastAPI instead, run `npm run build` (it outputs to `app/static/`) and
-open the backend URL.
-
-## How it works
-
-- `POST /api/info` — resolves title, thumbnail, and duration for the preview card.
-- `POST /api/jobs` — starts a download and returns a job id.
-- `GET /api/jobs/{id}/events` — a Server-Sent Events stream of progress, driven by
-  yt-dlp's progress and postprocessor hooks.
-- `GET /api/jobs/{id}/file` — streams the finished file with a
-  `Content-Disposition: attachment` header so the browser saves it.
-
-Each download is written to a temporary directory and streamed to you. The finished
-file is kept only until you start the next download (so you can re-save it), then
-removed — nothing is stored long-term.
 
 ## Project layout
 
