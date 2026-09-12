@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,6 +25,8 @@ from .models import (
     JobRequest,
     JobStatus,
     MediaInfo,
+    MediaType,
+    Mode,
 )
 
 manager = JobManager()
@@ -73,6 +76,48 @@ async def create_job(req: JobRequest) -> JobCreated:
     return JobCreated(id=job.id)
 
 
+@app.post("/api/previews", response_model=JobCreated)
+async def create_preview(req: InfoRequest) -> JobCreated:
+    if not req.url.strip():
+        raise HTTPException(status_code=400, detail="A YouTube link is required.")
+    job = manager.create(JobRequest(url=req.url, media_type=MediaType.video, mode=Mode.quality), preview=True)
+    return JobCreated(id=job.id)
+
+
+class ExportRequest(BaseModel):
+    start_time: float = 0
+    end_time: float | None = None
+    media_type: MediaType = MediaType.video
+    mode: Mode = Mode.compatibility
+
+
+@app.post("/api/previews/{job_id}/exports", response_model=JobCreated)
+async def create_export(job_id: str, req: ExportRequest) -> JobCreated:
+    source = _preview_job(job_id)
+    try:
+        request = JobRequest(url=source.request.url, **req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Choose a valid start and end time.") from exc
+    if request.start_time >= source.duration or (request.end_time is not None and request.end_time > source.duration):
+        raise HTTPException(status_code=422, detail="The selected interval is outside the video duration.")
+    return JobCreated(id=manager.create(request, source=source).id)
+
+
+def _preview_job(job_id: str) -> Job:
+    job = manager.get(job_id)
+    if job is None or job.status is not JobStatus.completed or not job.previewpath or not job.duration:
+        raise HTTPException(status_code=404, detail="Preview expired or is not ready. Load the video again.")
+    job.finished_at = time.monotonic()
+    return job
+
+
+@app.get("/api/previews/{job_id}/media")
+async def preview_media(job_id: str) -> FileResponse:
+    job = _preview_job(job_id)
+    # Inline range-capable response supports playback and seeking in the editor.
+    return FileResponse(job.previewpath, media_type="video/mp4", content_disposition_type="inline")
+
+
 @app.get("/api/jobs/{job_id}/events")
 async def job_events(job_id: str) -> EventSourceResponse:
     job = manager.get(job_id)
@@ -100,8 +145,8 @@ async def job_file(job_id: str) -> FileResponse:
     if job is None or job.status is not JobStatus.completed or not job.filepath:
         raise HTTPException(status_code=404, detail="File is not ready.")
     media_type = CONTENT_TYPES.get(job.ext or "", "application/octet-stream")
-    # Not deleted on send: the file lingers until the next download is started
-    # (see JobManager._sweep_finished) so the user can re-save if needed.
+    # Recent results survive new jobs so concurrent tabs can save independently.
+    # Expired files are swept when a new job starts (see JobManager).
     return FileResponse(
         job.filepath,
         media_type=media_type,
@@ -117,6 +162,7 @@ def _terminal_snapshot(job: Job) -> dict:
             "title": job.title,
             "ext": job.ext,
             "filesize": job.filesize,
+            "duration": job.duration,
         }
     return {
         "phase": "complete",

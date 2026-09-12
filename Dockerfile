@@ -22,6 +22,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# YouTube challenge solving needs a JavaScript runtime in the final image.
+COPY --from=web /usr/local/bin/node /usr/local/bin/node
+
 # uv binary, copied from the official image.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 

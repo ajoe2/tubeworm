@@ -1,19 +1,44 @@
 # tubeworm
 
-A YouTube downloader you run on your own computer. Paste a link, pick
-a file type, and click download.
+Load a YouTube video, preview and trim it in your browser, then download the
+selected section as audio or video.
 
-## Supported file types
+1. Paste a link and click **Load video**. Video and audio fetch in parallel to
+   the app server, then a playable preview is prepared. No browser save starts.
+2. Scrub through the video using the white playhead on the trim timeline or the player.
+3. Drag the left and right edges of the highlighted trim bar, or seek and click **Set start here** /
+   **Set end here**. The white playhead on the same bar scrubs without changing
+   the selection. **Play from playhead** starts there; **Play selection** plays just that interval and stops at its end.
+4. Choose an export format and click **Download selection**. The app trims the
+   retained original and starts the browser download only after that explicit action.
+   Enable **Loop selection** for repeated review. **Check start** and **Check end**
+   play the first/last three seconds of the selected clip.
+5. Keep editing to export more clips without fetching YouTube again.
 
-| Type  | Priority      | Output  | Streams                                           |
-| ----- | ------------- | ------- | ------------------------------------------------- |
-| Video | Quality       | `.mkv`  | Best AV1/VP9 video + Opus audio, losslessly muxed |
-| Video | Compatibility | `.mp4`  | H.264 + AAC — plays on anything                   |
-| Audio | Quality       | `.opus` | Native Opus, the highest-quality audio            |
-| Audio | Compatibility | `.m4a`  | AAC — plays on anything                            |
+The original full-quality source and a lightweight editing preview download in
+parallel. The preview prefers H.264/AAC at up to 720p and reuses compatible MP4
+files without re-encoding. This adds some network traffic but overlaps preview
+preparation with the original download. If a separate preview cannot be fetched,
+the app prepares one from the original as a fallback. Only incompatible codecs
+need conversion. Exports still use the original full-quality source resolution. Precise cuts re-encode
+video as H.264 and audio as Opus or AAC, so they can change quality. Preparing
+long videos and exporting clips can take time. Live videos are not supported
+by the editor.
 
-The quality options copy YouTube's original streams without re-encoding, so
-there's no quality loss.
+## Export formats
+
+| Type | Output choice | File | Codecs |
+| --- | --- | --- | --- |
+| Video | Compatible | `.mp4` | H.264 + AAC |
+| Video | Quality | `.mkv` | H.264 + Opus |
+| Audio | Compatible | `.m4a` | AAC |
+| Audio | Quality | `.opus` | Opus |
+
+Separate video/audio streams download concurrently, with up to eight concurrent
+fragments per stream when supported. Each stream has its own progress bar.
+Source files and previews stay on the app server for editing; recent results
+are retained for one hour after use. New jobs clean up expired results; active
+exports protect their source files. All temporary files are removed on shutdown.
 
 ## Run it with Docker
 
@@ -91,3 +116,32 @@ app/                FastAPI backend
 frontend/           React + Vite + Tailwind + shadcn-style UI
 Dockerfile          multi-stage: build UI, then Python runtime with ffmpeg
 ```
+
+## Validation
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+cd frontend
+npm test
+npm run typecheck
+npm run build
+```
+
+Backend tests use locally generated media and require `ffmpeg` and `ffprobe`.
+
+## YouTube HTTP 403 errors
+
+The app enables Node/Deno for YouTube JavaScript challenges and installs the
+matching solver through `yt-dlp[default]`. Docker includes Node; local Python
+runs require Node 22+ or Deno on `PATH` (in addition to ffmpeg).
+
+After updating the code, rebuild Docker with `docker compose up --build`, or run
+`uv sync` and restart the local server. A rejected media URL is automatically
+refreshed and retried once. If it still fails, inspect the server's yt-dlp
+warnings and update with `uv lock --upgrade-package yt-dlp` followed by `uv sync`
+(or rebuild Docker). YouTube may also reject requests for reasons unrelated to
+runtime support, such as restrictions on the video or the network address.
+
+The editor preloads preview media and coalesces drag events into serialized seeks,
+so new pointer positions do not repeatedly interrupt the video decoder. Drag
+feedback stays responsive while the latest requested frame is decoded.

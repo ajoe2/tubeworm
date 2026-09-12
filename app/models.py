@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class MediaType(str, Enum):
@@ -29,6 +29,14 @@ class JobRequest(BaseModel):
     url: str
     media_type: MediaType
     mode: Mode
+    start_time: float = Field(default=0, ge=0, allow_inf_nan=False)
+    end_time: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _valid_interval(self) -> "JobRequest":
+        if self.end_time is not None and self.end_time <= self.start_time:
+            raise ValueError("End time must be after start time.")
+        return self
 
     @field_validator("url")
     @classmethod
@@ -48,7 +56,7 @@ class MediaInfo(BaseModel):
 
     title: str | None = None
     uploader: str | None = None
-    duration: int | None = None  # seconds
+    duration: float | None = None  # seconds
     thumbnail: str | None = None
 
 
