@@ -1,161 +1,107 @@
-import { CheckCircle2, Loader2, Music2, Video } from "lucide-react"
-import type { StreamProgress } from "@/lib/api"
-import { formatBytes, formatEta, formatSpeed } from "@/lib/format"
+import { Loader2, Music2, Video } from "lucide-react"
 
-interface ProgressPanelProps {
-  purpose?: "preview" | "export"
-  stage: "prepare" | "download" | "process" | "retry"
-  streams: StreamProgress[]
-  cropped: boolean
-  selection: string
-  percent: number
-  indeterminate: boolean
-  phaseLabel: string
-  speed?: number | null
-  eta?: number | null
-  downloaded?: number | null
-  total?: number | null
+import type { ProcessStep, ProxyStatus, StreamProgress } from "@/lib/api"
+import { formatBytes, formatSpeed, formatTime } from "@/lib/format"
+import type { JobProgress } from "@/lib/useJob"
+
+const STEP_LABELS: Record<ProcessStep, string> = {
+  merge: "Combining video and audio…",
+  retry: "The link expired. Refreshing and retrying…",
+  "preview-wait": "Finishing the editing preview…",
+  preview: "Converting the preview for playback…",
+  trim: "Cutting and encoding your clip…",
+  remux: "Packaging the original streams…",
+  convert: "Converting for compatibility…",
 }
 
-export function ProgressPanel({
-  purpose,
-  stage,
-  streams,
-  cropped,
-  selection,
-  percent,
-  indeterminate,
-  phaseLabel,
-  speed,
-  eta,
-  downloaded,
-  total,
-}: ProgressPanelProps) {
-  const downloading = stage === "download"
-  const processing = stage === "process"
-  const steps =
-    purpose === "preview"
-      ? ["Fetch video", "Prepare preview", "Edit"]
-      : ["Source ready", "Trim clip", "Save"]
+const PROXY_LABELS: Record<ProxyStatus, string> = {
+  downloading: "downloading",
+  converting: "converting",
+  ready: "ready",
+}
+
+export function ProgressPanel({ progress }: { progress: JobProgress }) {
+  const { download, step, proxy } = progress
+  const label = step
+    ? STEP_LABELS[step]
+    : download
+      ? download.streams.length > 1
+        ? "Downloading video and audio…"
+        : "Downloading…"
+      : "Reading the link…"
+  const percent = step || !download ? null : download.percent
+
   return (
     <section
-      aria-label="Download progress"
-      className="animate-fade-up space-y-4 rounded-xl border border-border bg-card/70 p-4"
+      aria-label="Progress"
+      aria-live="polite"
+      className="animate-fade-up space-y-3 rounded-xl border border-border bg-card/70 p-4"
     >
-      <ol className="flex gap-2 text-xs">
-        {steps.map((label, index) => (
-          <li
-            key={label}
-            aria-current={index === (processing ? 1 : 0) ? "step" : undefined}
-            className={`flex flex-1 items-center gap-1.5 border-t-2 pt-2 ${index <= (processing ? 1 : 0) ? "border-primary text-foreground" : "border-border text-muted-foreground"}`}
-          >
-            {index === 0 && processing ? (
-              <CheckCircle2 className="h-3.5 w-3.5" />
-            ) : (
-              <span>{index + 1}.</span>
-            )}
-            {label}
-          </li>
-        ))}
-      </ol>
-      <p className="text-xs text-muted-foreground">{selection}</p>
-      <div className="flex items-start justify-between gap-3">
-        <p role="status" className="flex items-start gap-2 text-sm font-medium">
-          <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" />
-          {phaseLabel}
-        </p>
-        {downloading && !indeterminate && (
-          <span className="shrink-0 font-mono text-sm text-primary">
-            {Math.round(percent)}%
-          </span>
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="flex items-center gap-2 font-medium">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+          {label}
+        </span>
+        {percent != null && (
+          <span className="font-mono tabular-nums text-primary">{Math.round(percent)}%</span>
         )}
       </div>
-      <Bar
-        label={downloading ? "Combined download progress" : phaseLabel}
-        percent={indeterminate ? null : percent}
-      />
-      {downloading && streams.length > 0 && (
-        <div className="space-y-3">
-          {streams.map((stream) => {
-            const finished = stream.status === "finished"
-            const Icon = stream.label === "Audio" ? Music2 : Video
-            return (
-              <div
-                key={stream.id}
-                className="space-y-2 rounded-lg bg-secondary/30 p-3"
-              >
-                <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="flex items-center gap-2">
-                    <Icon className="h-3.5 w-3.5 text-muted-foreground" />
-                    {stream.label}
-                  </span>
-                  <span
-                    className={
-                      finished ? "text-primary" : "text-muted-foreground"
-                    }
-                  >
-                    {finished
-                      ? "Downloaded"
-                      : stream.status === "pending"
-                        ? "Connecting…"
-                        : stream.percent == null
-                          ? "Downloading…"
-                          : `${Math.round(stream.percent)}%`}
-                  </span>
-                </div>
-                <Bar
-                  label={`${stream.label} download`}
-                  percent={finished ? 100 : stream.percent}
-                />
-                {stream.downloaded != null && (
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {formatBytes(stream.downloaded)}
-                    {stream.total
-                      ? ` / ${formatBytes(stream.total)}`
-                      : " downloaded"}
-                  </p>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
-      {downloading ? (
+      <Bar label="Overall progress" percent={percent} />
+
+      {download && !step && (
         <>
-          <dl className="grid grid-cols-2 gap-2 font-mono text-xs">
-            <Readout label="Combined speed" value={formatSpeed(speed)} />
-            <Readout label="Download ETA" value={formatEta(eta)} />
-          </dl>
-          <p className="text-xs text-muted-foreground">
-            {total
-              ? `${formatBytes(downloaded)} of approximately ${formatBytes(total)}`
-              : `${formatBytes(downloaded)} downloaded`}{" "}
-            ·{" "}
-            {cropped
-              ? "Source download; trimming follows."
-              : purpose === "preview"
-                ? "Playable preview follows."
-                : "File preparation follows."}
+          {download.streams.length > 1 && (
+            <ul className="space-y-2">
+              {download.streams.map((stream) => (
+                <StreamRow key={stream.id} stream={stream} />
+              ))}
+            </ul>
+          )}
+          <p className="font-mono text-xs tabular-nums text-muted-foreground">
+            {formatBytes(download.downloaded)}
+            {download.total ? ` / ${formatBytes(download.total)}` : ""}
+            {download.speed ? ` · ${formatSpeed(download.speed)}` : ""}
+            {download.eta != null ? ` · ${formatTime(download.eta)} left` : ""}
           </p>
         </>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          {stage === "retry"
-            ? "The source rejected the download. Refreshing the link automatically for one more attempt."
-            : processing
-              ? cropped
-                ? "Downloads complete. Cutting your selected interval and preparing the file. This can take a moment."
-                : purpose === "preview"
-                  ? "Creating a playable preview. The editor will open automatically when it’s ready."
-                  : "Downloads complete. Preparing your file for the browser."
-              : "Resolving media streams. Downloads will begin shortly."}
+      )}
+
+      {proxy && (
+        <p className="text-xs text-muted-foreground">
+          Editing preview: {PROXY_LABELS[proxy]}
         </p>
       )}
     </section>
   )
 }
 
-function Bar({ label, percent }: { label: string; percent?: number | null }) {
+function StreamRow({ stream }: { stream: StreamProgress }) {
+  const Icon = stream.label === "Audio" ? Music2 : Video
+  const finished = stream.status === "finished"
+  const status = finished
+    ? "done"
+    : stream.status === "pending"
+      ? "connecting…"
+      : stream.percent == null
+        ? formatBytes(stream.downloaded)
+        : `${Math.round(stream.percent)}%`
+  return (
+    <li className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <Icon className="h-3.5 w-3.5" />
+          {stream.label}
+        </span>
+        <span className={finished ? "text-primary" : "font-mono tabular-nums text-muted-foreground"}>
+          {status}
+        </span>
+      </div>
+      <Bar label={`${stream.label} download`} percent={finished ? 100 : stream.percent} thin />
+    </li>
+  )
+}
+
+function Bar({ label, percent, thin }: { label: string; percent: number | null; thin?: boolean }) {
   return (
     <div
       role="progressbar"
@@ -163,27 +109,16 @@ function Bar({ label, percent }: { label: string; percent?: number | null }) {
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={percent == null ? undefined : Math.round(percent)}
-      className="relative h-1.5 overflow-hidden rounded-full bg-secondary"
+      className={`relative overflow-hidden rounded-full bg-secondary ${thin ? "h-1" : "h-2"}`}
     >
       {percent == null ? (
         <div className="absolute inset-y-0 left-0 w-1/4 animate-indeterminate rounded-full bg-primary" />
       ) : (
         <div
-          className="h-full rounded-full bg-primary transition-[width] duration-200"
+          className="h-full rounded-full bg-primary transition-[width] duration-200 ease-out"
           style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
         />
       )}
-    </div>
-  )
-}
-
-function Readout({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-secondary/40 px-2.5 py-2">
-      <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </dt>
-      <dd className="mt-1 tabular-nums">{value}</dd>
     </div>
   )
 }

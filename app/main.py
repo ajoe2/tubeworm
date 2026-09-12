@@ -5,53 +5,33 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from . import __version__, downloader
-from .jobs import Job, JobManager
-from .models import (
-    CONTENT_TYPES,
-    JobCreated,
-    JobRequest,
-    JobStatus,
-    MediaInfo,
-    MediaType,
-    Mode,
-)
+from .jobs import Job, JobManager, friendly_error
+from .models import CONTENT_TYPES, ExportRequest, JobCreated, MediaInfo, PreviewRequest
 
 manager = JobManager()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
-    manager.shutdown()  # tidy up any leftover temp files on exit
+    sweeper = asyncio.create_task(manager.sweep_forever())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        manager.shutdown()  # remove every temp file on exit
 
 
 app = FastAPI(title="tubeworm", version=__version__, lifespan=lifespan)
-
-# Same-origin in production (the SPA is served from this app). Permissive for
-# localhost dev where the Vite dev server runs on a different port.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-class InfoRequest(BaseModel):
-    url: str
 
 
 @app.get("/api/health")
@@ -60,62 +40,33 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/api/info", response_model=MediaInfo)
-async def info(req: InfoRequest) -> MediaInfo:
-    url = req.url.strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="A YouTube link is required.")
+async def info(req: PreviewRequest) -> MediaInfo:
+    """Title, channel, length and thumbnail; the extraction is reused by the load."""
     try:
-        return await asyncio.to_thread(downloader.fetch_info, url)
+        return await asyncio.to_thread(downloader.fetch_info, req.url)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=_clean_error(exc)) from exc
-
-
-@app.post("/api/jobs", response_model=JobCreated)
-async def create_job(req: JobRequest) -> JobCreated:
-    job = manager.create(req)
-    return JobCreated(id=job.id)
+        raise HTTPException(status_code=400, detail=friendly_error(exc)) from exc
 
 
 @app.post("/api/previews", response_model=JobCreated)
-async def create_preview(req: InfoRequest) -> JobCreated:
-    if not req.url.strip():
-        raise HTTPException(status_code=400, detail="A YouTube link is required.")
-    job = manager.create(JobRequest(url=req.url, media_type=MediaType.video, mode=Mode.quality), preview=True)
-    return JobCreated(id=job.id)
-
-
-class ExportRequest(BaseModel):
-    start_time: float = 0
-    end_time: float | None = None
-    media_type: MediaType = MediaType.video
-    mode: Mode = Mode.compatibility
-
-
-@app.post("/api/previews/{job_id}/exports", response_model=JobCreated)
-async def create_export(job_id: str, req: ExportRequest) -> JobCreated:
-    source = _preview_job(job_id)
-    try:
-        request = JobRequest(url=source.request.url, **req.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Choose a valid start and end time.") from exc
-    if request.start_time >= source.duration or (request.end_time is not None and request.end_time > source.duration):
-        raise HTTPException(status_code=422, detail="The selected interval is outside the video duration.")
-    return JobCreated(id=manager.create(request, source=source).id)
-
-
-def _preview_job(job_id: str) -> Job:
-    job = manager.get(job_id)
-    if job is None or job.status is not JobStatus.completed or not job.previewpath or not job.duration:
-        raise HTTPException(status_code=404, detail="Preview expired or is not ready. Load the video again.")
-    job.finished_at = time.monotonic()
-    return job
+async def create_preview(req: PreviewRequest) -> JobCreated:
+    return JobCreated(id=manager.create_preview(req.url).id)
 
 
 @app.get("/api/previews/{job_id}/media")
 async def preview_media(job_id: str) -> FileResponse:
-    job = _preview_job(job_id)
-    # Inline range-capable response supports playback and seeking in the editor.
+    job = _preview(job_id)
+    # Inline and range-capable so the <video> element can seek.
     return FileResponse(job.previewpath, media_type="video/mp4", content_disposition_type="inline")
+
+
+@app.post("/api/previews/{job_id}/exports", response_model=JobCreated)
+async def create_export(job_id: str, req: ExportRequest) -> JobCreated:
+    source = _preview(job_id)
+    duration = source.duration or 0
+    if req.start_time >= duration or (req.end_time is not None and req.end_time > duration):
+        raise HTTPException(status_code=422, detail="The selection is outside the video.")
+    return JobCreated(id=manager.create_export(source, req).id)
 
 
 @app.get("/api/jobs/{job_id}/events")
@@ -125,15 +76,10 @@ async def job_events(job_id: str) -> EventSourceResponse:
         raise HTTPException(status_code=404, detail="Unknown job.")
 
     async def stream():
-        # If the job already finished before this stream connected, just emit a
-        # terminal snapshot so the client isn't left waiting on an empty queue.
-        if job.done.is_set():
-            yield {"data": json.dumps(_terminal_snapshot(job))}
+        if job.done.is_set():  # finished before we connected: send the outcome only
+            yield {"data": json.dumps(job.terminal_event())}
             return
-        while True:
-            event = await job.queue.get()
-            if event is None:  # sentinel
-                break
+        while (event := await job.queue.get()) is not None:
             yield {"data": json.dumps(event)}
 
     return EventSourceResponse(stream())
@@ -142,53 +88,31 @@ async def job_events(job_id: str) -> EventSourceResponse:
 @app.get("/api/jobs/{job_id}/file")
 async def job_file(job_id: str) -> FileResponse:
     job = manager.get(job_id)
-    if job is None or job.status is not JobStatus.completed or not job.filepath:
+    if job is None or not job.ready:
         raise HTTPException(status_code=404, detail="File is not ready.")
-    media_type = CONTENT_TYPES.get(job.ext or "", "application/octet-stream")
-    # Recent results survive new jobs so concurrent tabs can save independently.
-    # Expired files are swept when a new job starts (see JobManager).
     return FileResponse(
         job.filepath,
-        media_type=media_type,
+        media_type=CONTENT_TYPES.get(job.ext or "", "application/octet-stream"),
         filename=_download_name(job),
     )
 
 
-def _terminal_snapshot(job: Job) -> dict:
-    if job.status is JobStatus.completed:
-        return {
-            "phase": "complete",
-            "status": "completed",
-            "title": job.title,
-            "ext": job.ext,
-            "filesize": job.filesize,
-            "duration": job.duration,
-        }
-    return {
-        "phase": "complete",
-        "status": "error",
-        "error": job.error or "Download failed.",
-    }
+def _preview(job_id: str) -> Job:
+    job = manager.get(job_id)
+    if job is None or not job.ready or not job.previewpath or not job.duration:
+        raise HTTPException(status_code=404, detail="That video has expired. Load it again.")
+    job.touch()  # keep it alive while in use
+    return job
 
 
 def _download_name(job: Job) -> str:
-    title = (job.title or "download").strip()
     # Drop characters that are illegal in filenames / Content-Disposition.
-    title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", title).strip(". ") or "download"
+    title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", job.title).strip(". ") or "download"
     return f"{title}.{job.ext}"
 
 
-def _clean_error(exc: Exception) -> str:
-    msg = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
-    if msg.lower().startswith("error:"):
-        msg = msg[len("error:"):].strip()
-    return (msg.splitlines()[0] if msg else "Could not read that link.") or "Could not read that link."
-
-
-# --------------------------------------------------------------------------- #
 # Static frontend (built by Vite into app/static). Mounted last so it never
 # shadows the API routes above.
-# --------------------------------------------------------------------------- #
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
@@ -197,11 +121,8 @@ else:
     @app.get("/", response_class=HTMLResponse)
     async def _dev_placeholder() -> str:
         return (
-            "<main style='font-family:system-ui;max-width:40rem;margin:4rem auto;"
-            "padding:0 1rem;color:#e8edef;background:#0b1014'>"
-            "<h1>tubeworm</h1>"
-            "<p>The API is running, but the frontend hasn't been built yet.</p>"
-            "<p>For development run the Vite dev server in <code>frontend/</code> "
-            "(<code>npm run dev</code>); for production build it so it lands in "
-            "<code>app/static</code>.</p></main>"
+            "<main style='font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem'>"
+            "<h1>tubeworm</h1><p>The API is running but the frontend is not built. "
+            "Run <code>npm run dev</code> in <code>frontend/</code> for development, "
+            "or <code>npm run build</code> to serve it from here.</p></main>"
         )

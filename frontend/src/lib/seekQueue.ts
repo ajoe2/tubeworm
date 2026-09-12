@@ -3,13 +3,19 @@ export class SeekQueue {
   private pending: number | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private lastSeek = -Infinity
+  private inFlight = false
   private disposed = false
   constructor(
     private player: HTMLVideoElement,
     private settled: () => void,
   ) {}
+  /** A seek is queued or the decoder is still seeking. */
   get busy() {
     return this.pending != null || this.player.seeking
+  }
+  /** The current decoder seek was started by this queue (not by the user). */
+  get seeking() {
+    return this.inFlight
   }
   request(time: number, immediate = false) {
     this.pending = time
@@ -44,9 +50,11 @@ export class SeekQueue {
       return
     }
     this.lastSeek = performance.now()
+    this.inFlight = true
     this.player.currentTime = time
   }
   onSeeked() {
+    this.inFlight = false
     if (this.pending != null) this.flush()
     else this.settled()
   }

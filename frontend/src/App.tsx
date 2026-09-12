@@ -1,358 +1,152 @@
-import { useEffect, useRef, useState } from "react"
-import {
-  AlertTriangle,
-  ArrowDownToLine,
-  Link2,
-  Music2,
-  ShieldCheck,
-  Sparkles,
-  Video,
-} from "lucide-react"
+import { useState } from "react"
+import { ArrowDownToLine, CheckCircle2, Download } from "lucide-react"
+
 import { ClipEditor } from "@/components/ClipEditor"
+import { ErrorAlert } from "@/components/ErrorAlert"
+import { ExportOptions, type ExportFormat } from "@/components/ExportOptions"
+import { LinkForm } from "@/components/LinkForm"
 import { ProgressPanel } from "@/components/ProgressPanel"
-import { Segmented } from "@/components/Segmented"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import {
-  eventsUrl,
-  fileUrl,
-  createPreview,
-  exportSelection,
-  type DownloadEvent,
-  type MediaType,
-  type Mode,
-  type StreamProgress,
-} from "@/lib/api"
-import { formatDuration } from "@/lib/format"
+import { createExport, createPreview, fileUrl, previewMediaUrl } from "@/lib/api"
+import { formatBytes, formatTime } from "@/lib/format"
+import { useJob, type JobResult } from "@/lib/useJob"
+
+// Mirrors WHOLE_TOLERANCE on the server.
+const WHOLE_TOLERANCE = 0.05
+
+interface Source {
+  id: string
+  title: string
+  duration: number
+  lossless: string[]
+}
 
 export default function App() {
-  const [url, setUrl] = useState("")
-  const [preview, setPreview] = useState<{
-    id: string
-    title: string
-    duration: number
-  } | null>(null)
-  const [phase, setPhase] = useState<"idle" | "ingest" | "edit" | "export">(
-    "idle",
-  )
-  const [event, setEvent] = useState<DownloadEvent | null>(null)
-  const [previewStatus, setPreviewStatus] = useState(
-    "Preparing the editing preview alongside the original download.",
-  )
-  const [streams, setStreams] = useState<StreamProgress[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<string | null>(null)
-  const [start, setStart] = useState(0)
-  const [end, setEnd] = useState(0)
-  const [mediaType, setMediaType] = useState<MediaType>("video")
-  const [mode, setMode] = useState<Mode>("compatibility")
-  const es = useRef<EventSource | null>(null)
-  const busyRef = useRef(false)
-  const busy = phase === "ingest" || phase === "export"
-  useEffect(() => () => es.current?.close(), [])
+  const job = useJob()
+  const [source, setSource] = useState<Source | null>(null)
+  const [selection, setSelection] = useState({ start: 0, end: 0 })
+  const [format, setFormat] = useState<ExportFormat>({ mediaType: "video", mode: "compatibility" })
+  const [saved, setSaved] = useState<JobResult | null>(null)
 
-  function save(id: string) {
-    const a = document.createElement("a")
-    a.href = fileUrl(id)
-    a.download = ""
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
+  async function load(url: string) {
+    const result = await job.run(() => createPreview(url))
+    if (!result) return
+    const duration = result.duration ?? 0
+    setSource({ id: result.id, title: result.title, duration, lossless: result.lossless })
+    setSelection({ start: 0, end: duration })
+    setSaved(null)
   }
 
-  async function run(kind: "ingest" | "export") {
-    if (busyRef.current || !url.trim() || (kind === "export" && !preview))
-      return
-    busyRef.current = true
-    es.current?.close()
-    setError(null)
-    setResult(null)
-    setEvent(null)
-    setStreams([])
-    setPreviewStatus(
-      "Preparing the editing preview alongside the original download.",
-    )
-    setPhase(kind)
-    try {
-      const id =
-        kind === "ingest"
-          ? await createPreview(url.trim())
-          : await exportSelection(preview!.id, start, end, mediaType, mode)
-      const stream = new EventSource(eventsUrl(id))
-      es.current = stream
-      stream.onmessage = ({ data }) => {
-        const next = JSON.parse(data) as DownloadEvent
-        if (next.phase === "preview") {
-          setPreviewStatus(
-            next.status === "completed"
-              ? "Editing preview ready. Finishing the original download."
-              : next.postprocessor
-                ? "Preparing the browser preview alongside the original download."
-                : "Fetching the lightweight preview alongside the original download.",
-          )
-          return
-        }
-        setEvent(next)
-        if (next.phase === "download") setStreams(next.streams ?? [])
-        if (next.postprocessor === "Refresh") setStreams([])
-        if (next.phase !== "complete") return
-        stream.close()
-        busyRef.current = false
-        if (next.status !== "completed") {
-          setError(next.error ?? "Could not prepare the video.")
-          setPhase(kind === "ingest" ? "idle" : "edit")
-          return
-        }
-        if (kind === "ingest") {
-          if (!next.duration || next.duration <= 0) {
-            setError("The video has no playable duration.")
-            setPhase("idle")
-            return
-          }
-          setPreview({
-            id,
-            title: next.title ?? "Video",
-            duration: next.duration,
-          })
-          setStart(0)
-          setEnd(next.duration)
-          setPhase("edit")
-        } else {
-          setResult(id)
-          setPhase("edit")
-          save(id)
-        }
-      }
-      stream.onerror = () => {
-        stream.close()
-        busyRef.current = false
-        setError("Lost connection to the server. Please try again.")
-        setPhase(kind === "ingest" ? "idle" : "edit")
-      }
-    } catch (err) {
-      busyRef.current = false
-      setError(err instanceof Error ? err.message : "Something went wrong.")
-      setPhase(kind === "ingest" ? "idle" : "edit")
-    }
+  async function exportClip() {
+    if (!source) return
+    const result = await job.run(() => createExport(source.id, { ...selection, ...format }))
+    if (!result) return
+    setSaved(result)
+    saveFile(result.id)
   }
-  const processing = event?.phase === "postprocess"
-  const refreshing = event?.postprocessor === "Refresh"
-  const stage = refreshing
-    ? "retry"
-    : processing || phase === "export"
-      ? "process"
-      : event?.phase === "download"
-        ? "download"
-        : "prepare"
-  const label = refreshing
-    ? "Refreshing link and retrying…"
-    : phase === "export"
-      ? "Preparing your selected clip"
-      : event?.postprocessor === "PreviewWait"
-        ? "Finishing the editing preview…"
-        : event?.postprocessor === "PreviewRemux"
-          ? "Packaging the preview…"
-          : event?.postprocessor === "Preview"
-            ? "Converting video for browser playback…"
-            : processing
-              ? "Combining video and audio"
-              : event?.phase === "download"
-                ? streams.length > 1
-                  ? "Fetching video and audio in parallel"
-                  : "Fetching video"
-                : "Reading your YouTube link…"
+
+  function reset() {
+    setSource(null)
+    setSaved(null)
+    job.clearError()
+  }
+
+  const whole =
+    source != null &&
+    selection.start <= WHOLE_TOLERANCE &&
+    selection.end >= source.duration - WHOLE_TOLERANCE
 
   return (
-    <div className="relative mx-auto flex min-h-dvh w-full max-w-2xl flex-col px-5 py-10 sm:py-16">
+    <div className="mx-auto flex min-h-dvh w-full max-w-2xl flex-col px-5 py-10 sm:py-16">
       <Header />
       <main className="mt-8 space-y-5 rounded-2xl border border-border bg-card/50 p-5 shadow-2xl shadow-black/40 sm:p-6">
-        <ol className="flex justify-between gap-2 text-xs text-muted-foreground">
-          <li className={!preview ? "text-primary" : ""}>1. Load video</li>
-          <li className={preview && !busy ? "text-primary" : ""}>
-            2. Preview &amp; trim
-          </li>
-          <li className={phase === "export" || result ? "text-primary" : ""}>
-            3. Download selection
-          </li>
-        </ol>
-        {!preview && (
-          <>
-            <label className="block space-y-2 text-sm">
-              <span>YouTube link</span>
-              <div className="relative">
-                <Link2 className="absolute left-4 top-4 h-4 w-4 text-muted-foreground" />
-                <Input
-                  aria-label="YouTube link"
-                  className="pl-11"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") run("ingest")
-                  }}
-                  disabled={busy}
-                  placeholder="Paste a YouTube link"
-                />
-              </div>
-            </label>
-            {!busy && (
-              <>
-                <Button
-                  size="lg"
-                  className="w-full"
-                  disabled={!url.trim()}
-                  onClick={() => run("ingest")}
-                >
-                  <Video className="h-4 w-4" />
-                  Load video
-                </Button>
-                <p className="text-sm text-muted-foreground">
-                  We’ll fetch the video and open a playable preview. Nothing is
-                  saved to your Downloads folder yet.
-                </p>
-              </>
-            )}
-          </>
-        )}
-        {preview && (
+        {source ? (
           <>
             <div className="flex items-start justify-between gap-3">
-              <h2 className="min-w-0 font-medium">{preview.title}</h2>
-              <Button
-                variant="outline"
-                size="default"
-                disabled={busy}
-                onClick={() => {
-                  setPreview(null)
-                  setResult(null)
-                  setError(null)
-                  setPhase("idle")
-                }}
-              >
+              <h2 className="min-w-0 truncate font-medium" title={source.title}>
+                {source.title}
+              </h2>
+              <Button variant="outline" size="sm" disabled={job.running} onClick={reset}>
                 New video
               </Button>
             </div>
+
             <ClipEditor
-              key={preview.id}
-              src={`/api/previews/${preview.id}/media`}
-              duration={preview.duration}
-              start={start}
-              end={end}
-              disabled={busy}
-              onChange={(a, b) => {
-                setStart(a)
-                setEnd(b)
-                setResult(null)
+              key={source.id}
+              src={previewMediaUrl(source.id)}
+              duration={source.duration}
+              start={selection.start}
+              end={selection.end}
+              disabled={job.running}
+              onChange={(start, end) => {
+                setSelection({ start, end })
+                setSaved(null)
               }}
             />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Segmented<MediaType>
-                label="Export format"
-                value={mediaType}
-                onChange={(v) => {
-                  setMediaType(v)
-                  setResult(null)
-                }}
-                disabled={busy}
-                options={[
-                  {
-                    value: "video",
-                    label: "Video",
-                    icon: <Video className="h-4 w-4" />,
-                  },
-                  {
-                    value: "audio",
-                    label: "Audio",
-                    icon: <Music2 className="h-4 w-4" />,
-                  },
-                ]}
-              />
-              <Segmented<Mode>
-                label="Output"
-                value={mode}
-                onChange={(v) => {
-                  setMode(v)
-                  setResult(null)
-                }}
-                disabled={busy}
-                options={[
-                  {
-                    value: "compatibility",
-                    label: "Compatible",
-                    icon: <ShieldCheck className="h-4 w-4" />,
-                  },
-                  {
-                    value: "quality",
-                    label: "Quality",
-                    icon: <Sparkles className="h-4 w-4" />,
-                  },
-                ]}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              .
-              {mediaType === "video"
-                ? mode === "quality"
-                  ? "mkv"
-                  : "mp4"
-                : mode === "quality"
-                  ? "opus"
-                  : "m4a"}{" "}
-              · Exports use the original source with precise cuts. Video is
-              re-encoded as H.264; audio uses{" "}
-              {mode === "quality" ? "Opus" : "AAC"}.
-            </p>
-            {!busy && (
-              <Button
-                size="lg"
-                className="w-full"
-                onClick={() => run("export")}
-              >
-                <ArrowDownToLine className="h-4 w-4" />
-                Download selection · {formatDuration(end - start)}
-              </Button>
+
+            <ExportOptions
+              value={format}
+              onChange={(next) => {
+                setFormat(next)
+                setSaved(null)
+              }}
+              whole={whole}
+              lossless={source.lossless}
+              disabled={job.running}
+            />
+
+            {job.running ? (
+              <ProgressPanel progress={job.progress} />
+            ) : (
+              <div className="space-y-3">
+                {job.error && <ErrorAlert message={job.error} />}
+                <Button size="lg" className="w-full" onClick={exportClip}>
+                  <ArrowDownToLine className="h-5 w-5" />
+                  {whole
+                    ? "Download full video"
+                    : `Download clip · ${formatTime(selection.end - selection.start, 1)}`}
+                </Button>
+                {saved && <SavedNotice result={saved} />}
+              </div>
             )}
           </>
-        )}
-        {busy && (
-          <ProgressPanel
-            stage={stage}
-            streams={streams}
-            cropped={phase === "export"}
-            selection={
-              phase === "ingest"
-                ? "Preparing the full video for the editor"
-                : `${formatDuration(start)} – ${formatDuration(end)}`
-            }
-            percent={event?.percent ?? 0}
-            indeterminate={stage !== "download" || event?.percent == null}
-            phaseLabel={label}
-            speed={event?.speed}
-            eta={event?.eta}
-            downloaded={event?.downloaded}
-            total={event?.total}
-            purpose={phase === "ingest" ? "preview" : "export"}
-          />
-        )}
-        {phase === "ingest" && (
-          <p className="text-xs text-muted-foreground">{previewStatus}</p>
-        )}
-        {error && <ErrorAlert message={error} />}
-        {result && (
-          <div
-            role="status"
-            className="space-y-2 rounded-xl border border-primary/30 bg-primary/5 p-4"
-          >
-            <p className="text-sm">
-              Your clip is ready and the browser download has started. You can
-              keep editing to export another clip.
-            </p>
-            <Button variant="secondary" onClick={() => save(result)}>
-              Save clip again
-            </Button>
-          </div>
+        ) : (
+          <LinkForm onLoad={load} busy={job.running} progress={job.progress} error={job.error} />
         )}
       </main>
       <Footer />
+    </div>
+  )
+}
+
+function saveFile(jobId: string) {
+  const a = document.createElement("a")
+  a.href = fileUrl(jobId)
+  a.download = "" // the server sets the filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+function SavedNotice({ result }: { result: JobResult }) {
+  return (
+    <div
+      role="status"
+      className="flex animate-fade-up flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/[0.06] px-4 py-3"
+    >
+      <div className="flex min-w-0 items-center gap-3">
+        <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" />
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Saved to your downloads</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {result.title}.{result.ext} · {formatBytes(result.filesize)}
+          </p>
+        </div>
+      </div>
+      <Button variant="ghost" size="sm" onClick={() => saveFile(result.id)}>
+        <Download className="h-3.5 w-3.5" />
+        Save again
+      </Button>
     </div>
   )
 }
@@ -362,11 +156,9 @@ function Header() {
     <header className="flex items-center gap-3">
       <PlumeMark />
       <div>
-        <h1 className="font-display text-2xl font-bold lowercase tracking-tight text-foreground">
-          tubeworm
-        </h1>
+        <h1 className="font-display text-2xl font-bold lowercase tracking-tight">tubeworm</h1>
         <p className="text-sm text-muted-foreground">
-          Download YouTube audio &amp; video. Keep it all, or trim a clip.
+          Download YouTube video or audio. Keep it all, or trim a clip.
         </p>
       </div>
     </header>
@@ -375,12 +167,7 @@ function Header() {
 
 function PlumeMark() {
   return (
-    <svg
-      viewBox="0 0 32 32"
-      className="h-10 w-10 shrink-0"
-      role="img"
-      aria-label="tubeworm logo"
-    >
+    <svg viewBox="0 0 32 32" className="h-10 w-10 shrink-0" role="img" aria-label="tubeworm logo">
       <rect
         x="11"
         y="17"
@@ -404,18 +191,6 @@ function PlumeMark() {
         <path d="M19 19 C 20.5 13, 20.5 10, 19 6.5" />
       </g>
     </svg>
-  )
-}
-
-function ErrorAlert({ message }: { message: string }) {
-  return (
-    <div
-      role="alert"
-      className="flex animate-fade-up items-start gap-2.5 rounded-lg border border-destructive/40 bg-destructive/10 px-3.5 py-3 text-sm text-destructive-foreground"
-    >
-      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-      <span className="min-w-0 break-words">{message}</span>
-    </div>
   )
 }
 

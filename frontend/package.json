@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/seekQueue.cjs"
+    "test": "node tests/seekQueue.cjs && node tests/format.cjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

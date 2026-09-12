@@ -1,49 +1,45 @@
 # tubeworm
 
-Load a YouTube video, preview and trim it in your browser, then download the
-selected section as audio or video.
+A YouTube downloader and clip trimmer you run on your own computer. Paste a
+link, preview the video in your browser, keep all of it or trim a section, and
+download it as video or audio.
 
-1. Paste a link and click **Load video**. Video and audio fetch in parallel to
-   the app server, then a playable preview is prepared. No browser save starts.
-2. Scrub through the video using the white playhead on the trim timeline or the player.
-3. Drag the left and right edges of the highlighted trim bar, or seek and click **Set start here** /
-   **Set end here**. The white playhead on the same bar scrubs without changing
-   the selection. **Play from playhead** starts there; **Play selection** plays just that interval and stops at its end.
-4. Choose an export format and click **Download selection**. The app trims the
-   retained original and starts the browser download only after that explicit action.
-   Enable **Loop selection** for repeated review. **Check start** and **Check end**
-   play the first/last three seconds of the selected clip.
-5. Keep editing to export more clips without fetching YouTube again.
+## How it works
 
-The original full-quality source and a lightweight editing preview download in
-parallel. The preview prefers H.264/AAC at up to 720p and reuses compatible MP4
-files without re-encoding. This adds some network traffic but overlaps preview
-preparation with the original download. If a separate preview cannot be fetched,
-the app prepares one from the original as a fallback. Only incompatible codecs
-need conversion. Exports still use the original full-quality source resolution. Precise cuts re-encode
-video as H.264 and audio as Opus or AAC, so they can change quality. Preparing
-long videos and exporting clips can take time. Live videos are not supported
-by the editor.
+1. **Paste a link and click Load video.** The full-quality video and a small
+   editing preview download to the app server in parallel. Nothing is saved
+   to your Downloads folder yet.
+2. **Trim.** Drag the coral handles on the timeline, or scrub to a spot and use
+   *Set start here* / *Set end here*. *Play selection* plays just your clip;
+   click a start or end time to hear that edge. Or leave the selection alone
+   to keep the whole video.
+3. **Pick a format and click Download.** The file is prepared from the retained
+   original and saved through your browser. Keep editing to export more clips
+   without fetching YouTube again.
 
 ## Export formats
 
-| Type | Output choice | File | Codecs |
-| --- | --- | --- | --- |
-| Video | Compatible | `.mp4` | H.264 + AAC |
-| Video | Quality | `.mkv` | H.264 + Opus |
-| Audio | Compatible | `.m4a` | AAC |
-| Audio | Quality | `.opus` | Opus |
+| Format | Priority   | File    | Whole video                          | Trimmed clip           |
+| ------ | ---------- | ------- | ------------------------------------ | ---------------------- |
+| Video  | Quality    | `.mkv`  | Original streams copied, no loss     | H.264 + Opus           |
+| Video  | Compatible | `.mp4`  | Copied if H.264/AAC, else converted  | H.264 + AAC            |
+| Audio  | Quality    | `.opus` | Original Opus copied, no loss        | Opus 192 kb/s          |
+| Audio  | Compatible | `.m4a`  | Copied if AAC, else converted        | AAC 192 kb/s           |
 
-Separate video/audio streams download concurrently, with up to eight concurrent
-fragments per stream when supported. Each stream has its own progress bar.
-Source files and previews stay on the app server for editing; recent results
-are retained for one hour after use. New jobs clean up expired results; active
-exports protect their source files. All temporary files are removed on shutdown.
+Whole-video exports copy the original streams whenever the container allows it,
+so they are fast and lossless. Trimmed clips are re-encoded so the cut lands
+exactly on your times; the UI tells you which will happen before you export.
+YouTube's best streams are usually AV1/VP9 + Opus, so `.mkv` and `.opus` are the
+lossless choices. Live streams cannot be edited.
+
+Downloaded originals stay on the app server for an hour after their last use so
+you can export more clips, then they are removed. Everything is removed on
+shutdown.
 
 ## Run it with Docker
 
-Docker manages all dependencies, so you don't have to install any yourself. The steps are the same on Linux, macOS,
-and Windows.
+Docker manages all dependencies, so you don't have to install any yourself. The
+steps are the same on Linux, macOS, and Windows.
 
 ### 1. Install Docker
 
@@ -105,43 +101,49 @@ Go to **<http://localhost:8000>** in your browser.
 - **Run in the background:** add `-d`, e.g. `docker compose up -d --build`, and stop
   later with `docker compose down`.
 
+## Run it without Docker
+
+You need `ffmpeg` and `ffprobe`, Node 22+ (yt-dlp uses it to solve YouTube's
+JavaScript challenges), and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync
+(cd frontend && npm ci && npm run build)   # emits app/static
+uv run python main.py                      # http://127.0.0.1:8000
+```
+
+For frontend development run `npm run dev` in `frontend/` alongside the API;
+Vite proxies `/api` to it.
+
 ## Project layout
 
 ```
 app/                FastAPI backend
   main.py           routes, SSE, static hosting, lifespan cleanup
-  downloader.py     yt-dlp format selection + run
-  jobs.py           in-memory job manager, thread→asyncio bridge
-  models.py         schemas + the (type, mode) → container map
-frontend/           React + Vite + Tailwind + shadcn-style UI
-Dockerfile          multi-stage: build UI, then Python runtime with ffmpeg
+  jobs.py           in-memory jobs, thread→asyncio bridge, retention sweep
+  downloader.py     yt-dlp: metadata cache, parallel stream downloads
+  media.py          ffmpeg: probing, lossless mux, preview proxy, clip export
+  models.py         schemas + the (format, priority) → container map
+frontend/           React + Vite + Tailwind
+  src/App.tsx       screens: link form → editor
+  src/lib/useJob.ts follows one server job over SSE
+  src/components/   ClipEditor, TrimTimeline, ExportOptions, ProgressPanel, LinkForm
+tests/              backend tests (need ffmpeg/ffprobe; no network)
+Dockerfile          multi-stage: build UI, then Python runtime with ffmpeg + node
 ```
 
 ## Validation
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
-cd frontend
-npm test
-npm run typecheck
-npm run build
+uv run python -m unittest discover -s tests
+cd frontend && npm test && npm run typecheck && npm run build
 ```
-
-Backend tests use locally generated media and require `ffmpeg` and `ffprobe`.
 
 ## YouTube HTTP 403 errors
 
-The app enables Node/Deno for YouTube JavaScript challenges and installs the
-matching solver through `yt-dlp[default]`. Docker includes Node; local Python
-runs require Node 22+ or Deno on `PATH` (in addition to ffmpeg).
-
-After updating the code, rebuild Docker with `docker compose up --build`, or run
-`uv sync` and restart the local server. A rejected media URL is automatically
-refreshed and retried once. If it still fails, inspect the server's yt-dlp
-warnings and update with `uv lock --upgrade-package yt-dlp` followed by `uv sync`
-(or rebuild Docker). YouTube may also reject requests for reasons unrelated to
-runtime support, such as restrictions on the video or the network address.
-
-The editor preloads preview media and coalesces drag events into serialized seeks,
-so new pointer positions do not repeatedly interrupt the video decoder. Drag
-feedback stays responsive while the latest requested frame is decoded.
+A rejected media URL is refreshed and retried once automatically. If downloads
+still fail with HTTP 403, YouTube has probably changed something: update yt-dlp
+with `uv lock --upgrade-package yt-dlp && uv sync` (or rebuild Docker) and check
+the server log for JavaScript-challenge warnings. YouTube may also reject
+requests for reasons unrelated to the app, such as restrictions on the video or
+on your network address.

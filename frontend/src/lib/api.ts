@@ -11,27 +11,60 @@ export interface MediaInfo {
 export interface StreamProgress {
   id: string
   label: string
-  status: string
-  percent?: number | null
-  downloaded?: number | null
-  total?: number | null
+  status: "pending" | "downloading" | "finished" | "error"
+  percent: number | null
+  downloaded: number | null
+  total: number | null
 }
 
 export interface DownloadEvent {
-  duration?: number | null
-  streams?: StreamProgress[]
-  phase: "download" | "postprocess" | "complete" | "preview"
-  status?: string
-  percent?: number | null
-  downloaded?: number | null
-  total?: number | null
-  speed?: number | null
-  eta?: number | null
-  postprocessor?: string | null
-  title?: string | null
-  ext?: string | null
-  filesize?: number | null
-  error?: string | null
+  phase: "download"
+  streams: StreamProgress[]
+  downloaded: number
+  total: number | null
+  speed: number | null
+  eta: number | null
+  percent: number | null
+}
+
+export type ProcessStep =
+  | "merge"
+  | "retry"
+  | "preview-wait"
+  | "preview"
+  | "trim"
+  | "remux"
+  | "convert"
+
+export type ProxyStatus = "downloading" | "converting" | "ready"
+
+export interface CompletedEvent {
+  phase: "complete"
+  status: "completed"
+  title: string
+  ext: string
+  filesize: number
+  duration: number | null
+  /** Containers a whole-video export reaches by pure stream copy. */
+  lossless: string[]
+}
+
+export type JobEvent =
+  | DownloadEvent
+  | { phase: "process"; step: ProcessStep }
+  | { phase: "proxy"; status: ProxyStatus }
+  | CompletedEvent
+  | { phase: "complete"; status: "error"; error: string }
+
+async function post<T>(path: string, body: unknown, fallback: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!res.ok) throw new Error(await readError(res, fallback))
+  return res.json()
 }
 
 async function readError(res: Response, fallback: string): Promise<string> {
@@ -42,81 +75,31 @@ async function readError(res: Response, fallback: string): Promise<string> {
   return fallback
 }
 
-export async function fetchInfo(
-  url: string,
-  signal?: AbortSignal,
-): Promise<MediaInfo> {
-  const res = await fetch("/api/info", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
-    signal,
-  })
-  if (!res.ok)
-    throw new Error(await readError(res, "Could not read that link."))
-  return res.json()
-}
-
-export async function createJob(
-  url: string,
-  mediaType: MediaType,
-  mode: Mode,
-  startTime = 0,
-  endTime?: number,
-): Promise<string> {
-  const res = await fetch("/api/jobs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      url,
-      media_type: mediaType,
-      mode,
-      start_time: startTime,
-      end_time: endTime,
-    }),
-  })
-  if (!res.ok)
-    throw new Error(await readError(res, "Could not start the download."))
-  const data = (await res.json()) as { id: string }
-  return data.id
-}
-
-export function eventsUrl(jobId: string): string {
-  return `/api/jobs/${jobId}/events`
-}
-
-export function fileUrl(jobId: string): string {
-  return `/api/jobs/${jobId}/file`
+export function fetchInfo(url: string, signal?: AbortSignal): Promise<MediaInfo> {
+  return post("/api/info", { url }, "Could not read that link.", signal)
 }
 
 export async function createPreview(url: string): Promise<string> {
-  const res = await fetch("/api/previews", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
-  })
-  if (!res.ok) throw new Error(await readError(res, "Could not load video."))
-  return (await res.json()).id
+  const { id } = await post<{ id: string }>("/api/previews", { url }, "Could not load the video.")
+  return id
 }
 
-export async function exportSelection(
-  id: string,
-  start: number,
-  end: number,
-  media_type: MediaType,
-  mode: Mode,
-): Promise<string> {
-  const res = await fetch(`/api/previews/${id}/exports`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      start_time: start,
-      end_time: end,
-      media_type,
-      mode,
-    }),
-  })
-  if (!res.ok)
-    throw new Error(await readError(res, "Could not export selection."))
-  return (await res.json()).id
+export interface ExportParams {
+  start: number
+  end: number
+  mediaType: MediaType
+  mode: Mode
 }
+
+export async function createExport(previewId: string, opts: ExportParams): Promise<string> {
+  const { id } = await post<{ id: string }>(
+    `/api/previews/${previewId}/exports`,
+    { start_time: opts.start, end_time: opts.end, media_type: opts.mediaType, mode: opts.mode },
+    "Could not export the selection.",
+  )
+  return id
+}
+
+export const eventsUrl = (jobId: string) => `/api/jobs/${jobId}/events`
+export const fileUrl = (jobId: string) => `/api/jobs/${jobId}/file`
+export const previewMediaUrl = (jobId: string) => `/api/previews/${jobId}/media`

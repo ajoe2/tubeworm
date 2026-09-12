@@ -9,7 +9,8 @@ app/static/
 frontend/node_modules/
 frontend/dist/
 
-# VCS / tooling / local
+# Tests, VCS, tooling
+tests/
 .git/
 .gitignore
 .dockerignore
